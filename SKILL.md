@@ -5,26 +5,33 @@ description: |
   Scan the open-source pathology AI ecosystem (HuggingFace, arXiv, GitHub, PapersWithCode,
   high-impact journals, Microsoft Research blog, Azure Foundry Labs, company blogs) for new
   foundation models, datasets, and approaches relevant to a configurable set of active research
-  hypotheses (read from a user-provided Notion DB). Score each finding 0-19 (relevance +
-  openness + technical), write rich-analysis cards to a findings Notion DB, push a Telegram
-  digest for hot findings (raw score ≥ 8 OR open code+weights). Use this skill when triggered
-  for scheduled OSS monitoring or manually via Assign Task.
-version: 1.0.0
+  hypotheses (read from a user-provided Notion DB). Apply a HARD domain filter (pathology only).
+  Score each finding 0-21 (relevance + openness + technical) using EXACT rubric components.
+  Apply applicability filter (drop findings outside user's local stack). Write rich-analysis
+  cards to a findings Notion DB, push a Telegram digest for hot findings (raw score ≥ 8 OR
+  open code+weights). Use this skill when triggered for scheduled OSS monitoring or manually
+  via Assign Task.
+version: 1.2.0
 metadata:
   recommended_cadence: twice weekly (e.g. Mon + Thu)
   config_sources:
     hypotheses_db: Notion DB with active research hypotheses (id in env NOTION_HYPOTHESES_DS_ID)
+    watched_sources_db: Notion DB with HF orgs + company blogs to scan (id in env NOTION_WATCHED_SOURCES_DS_ID)
     findings_db: Notion DB for findings — read for dedup/calibration, write new entries (id in env NOTION_FINDINGS_DS_ID)
     local_context_endpoint: optional HTTP endpoint returning your local domain inventory (url in env LOCAL_CONTEXT_ENDPOINT_URL)
+  changelog:
+    "1.2.0": Inline scoring rubric, hard domain filter, applicability filter, enforce Notes/Telegram templates, fix max score 19→21
+    "1.1.0": Externalize HF orgs + company blogs to Notion config DB
+    "1.0.0": Initial public version
 ---
 
 # OSS Radar — Open Source Pathology AI Monitor
 
 ## Mission
 
-A scheduled digest of new open-source models, papers, datasets in computational pathology. Each finding is scored 0-19 against your active research hypotheses (configured in Notion) and — optionally — against your local domain inventory (e.g. what datasets you have annotated, what models you already use). Hot findings (score ≥ 8 OR full open stack) go to Telegram; everything ≥ 4 goes to the findings Notion DB with rich analysis (openness, training population, clinical limits, local-context match).
+A scheduled digest of new open-source models, papers, datasets in computational pathology. Each finding is filtered (hard domain check), scored 0-21 against your active hypotheses, and assessed for applicability against your local stack. Hot findings (raw score ≥ 8 OR full open stack) go to Telegram; everything ≥ 4 AND applicable to your stack goes to the findings Notion DB with full rich analysis.
 
-**Not a news aggregator** — a filter producing 0-5 hot findings per run, plus 5-15 medium-relevance entries for later review.
+**Not a news aggregator** — a filter producing 0-5 hot findings per run, plus 3-10 medium-relevance entries for later review. Findings that aren't usable in your stack (e.g. radiology when you do pathology, spatial transcriptomics when you do H&E only) are dropped or marked Not Relevant — they don't pollute the findings DB.
 
 ## Configuration sources (runtime)
 
@@ -32,33 +39,65 @@ Four things vary between runs and must be **fetched at runtime**, not embedded i
 
 1. **`active_hypotheses`** — from Notion DB `$NOTION_HYPOTHESES_DS_ID`
    - Filter rows where status indicates active work (configure via `$HYPOTHESES_ACTIVE_STATUSES`, comma-separated, e.g. `Dev,In progress,To do,Review`)
-   - Extract multi-select tags from a configurable column (`$HYPOTHESES_TAGS_COLUMN`, default `Models`) — these are your "what we care about" signals (e.g. specific tumor types, stains, biomarkers)
+   - Extract multi-select tags from a configurable column (`$HYPOTHESES_TAGS_COLUMN`, default `Models`) — these are your "what we care about" signals
    - These tags drive scoring boosts
 
 2. **`watched_sources`** — from Notion DB `$NOTION_WATCHED_SOURCES_DS_ID`
    - Required columns: `Name` (title), `Type` (select: `hf_org` / `company_blog`), `URL` (url), `Status` (select: `active` / `inactive`), `Notes` (text)
    - Filter rows where `Status = active`
-   - Rows with `Type = hf_org` → scan targets for Category A (HuggingFace) in `source-process.md`
-   - Rows with `Type = company_blog` → scan targets for Category E (Company blogs)
-   - The skill does NOT hardcode any organization or blog URLs — they live entirely in this DB and you edit them in Notion
-   - If empty (no active rows) → categories A and E are skipped silently (other categories still run)
+   - Rows with `Type = hf_org` → scan targets for Category A; rows with `Type = company_blog` → Category E
+   - The skill does NOT hardcode any organization or blog URLs
 
 3. **`local_context_snapshot`** — from `$LOCAL_CONTEXT_ENDPOINT_URL` (optional)
    - HTTP GET, returns JSON describing your local domain inventory in any shape
-   - The LLM uses this as context when filling the `Local Context Match` field for each finding
-   - If env var not set or endpoint fails → skip this enrichment, write `n/a — local context unavailable` in that field
+   - Used by the **applicability filter** (Step 4) and `Local Context Match` field
+   - If env var not set or endpoint fails → applicability filter skipped, write `n/a — local context unavailable` in field
 
 4. **`recent_findings`** — from Notion DB `$NOTION_FINDINGS_DS_ID`
-   - Query 1: rows where date-found ≥ 90 days ago → build seen-set (URLs + names) for dedup
-   - Query 2: last 20 rows with `Status` in (e.g. `Not Relevant`, `Relevant`, `In Use`) → calibration signals (Step 0)
+   - Query 1: rows where date-found ≥ 90 days ago → seen-set for dedup
+   - Query 2: last 20 rows with `Status` in (`Not Relevant`, `Relevant`, `In Use`) → calibration
 
 **Output:** write new findings to the SAME `$NOTION_FINDINGS_DS_ID` DB.
 
 Halt conditions:
-- Hypotheses DB unreachable → halt + Telegram alert ("can't determine what to score against")
-- Findings DB unreachable → halt + Telegram alert ("can't read seen-set, refuse to risk duplicates")
-- Watched sources DB unreachable → halt + Telegram alert ("can't determine scan targets")
-- Local context endpoint unreachable → continue, mark `Local Context Match` as `n/a`
+- Hypotheses DB unreachable → halt + Telegram alert
+- Watched sources DB unreachable → halt + Telegram alert
+- Findings DB unreachable → halt + Telegram alert
+- Local context endpoint unreachable → continue, write `n/a` in field
+
+## Domain filter — HARD (applies BEFORE scoring)
+
+**This is the first filter applied to every candidate, BOTH inside extractor sub-agents AND in the main session classifier (defense in depth).**
+
+### IN SCOPE — score normally
+
+- Histology (H&E, IHC, special stains on tissue sections)
+- Cytology (FNA, Pap smears, urine, body fluid smears)
+- Spatial omics + histology (when histology is the primary modality the model operates on directly)
+- Immunohistochemistry (any marker)
+- Molecular pathology coupled with histology
+- WSI analysis, tile classification, cell detection, mitosis counting, tumor segmentation, stain normalization, gland detection
+
+### OUT OF SCOPE — DROP without scoring, do NOT write to Notion
+
+- **Radiology**: X-ray, chest X-ray, CT, MRI, mammography imaging (not pathology slides), ultrasound, PET, fluoroscopy
+- **Dermatology imaging**: clinical skin photos, dermoscopy
+- **Ophthalmology**: retinal scans, OCT, fundus
+- **Cardiology**: ECG, echocardiogram, cardiac MRI
+- **Endoscopy**: colonoscopy video, gastroscopy, capsule endoscopy
+- **General medical NLP**: clinical note generation, EHR-only models, medical Q&A without imaging
+- **Genomics-only**: pure DNA/RNA sequence models without paired imaging
+- **Surgical / robotic surgery video**
+
+### Ambiguous cases
+
+If you cannot confidently determine the domain from the source page → DROP with rationale `out-of-domain: ambiguous, source did not clarify modality`. Better to skip a real pathology finding than pollute the findings DB with non-pathology noise.
+
+### How the filter is applied
+
+- **Extractor sub-agents** (Step 2): apply filter BEFORE returning candidates. Out-of-scope items never reach the main session. Each sub-agent logs a count of `filtered_out_of_scope` in its return summary.
+- **Main session classifier** (Step 3): apply filter again as defense in depth, before scoring. If a candidate has slipped through, drop it now with rationale.
+- **Hard rule**: no out-of-scope item should ever be written to Notion. If you see one, regenerate.
 
 ## Notion API access (critical — read before any Notion call)
 
@@ -66,10 +105,9 @@ The Paperclip-managed runtime has **Node.js** but **no `curl` / `jq`**. Use Node
 
 **All Notion API calls must use the data-source API (2025-09-03) — not the legacy databases API.**
 
-The env vars `NOTION_HYPOTHESES_DS_ID` and `NOTION_FINDINGS_DS_ID` contain **data source IDs**. They go in the `data_sources` URL path.
+The env vars `NOTION_HYPOTHESES_DS_ID` / `NOTION_FINDINGS_DS_ID` / `NOTION_WATCHED_SOURCES_DS_ID` contain **data source IDs**. They go in the `data_sources` URL path.
 
 ### Reading rows from a DB
-
 ```
 POST https://api.notion.com/v1/data_sources/{id}/query
 Headers:
@@ -80,7 +118,6 @@ Body: {"page_size": 100, "filter": {...optional...}}
 ```
 
 ### Creating a row (new finding)
-
 ```
 POST https://api.notion.com/v1/pages
 Headers: (same as above)
@@ -90,8 +127,7 @@ Body: {
 }
 ```
 
-### Updating an existing row (finding has new info — e.g. weights released after preprint)
-
+### Updating an existing row
 ```
 PATCH https://api.notion.com/v1/pages/{page_id}
 Headers: (same as above)
@@ -109,146 +145,280 @@ If Notion returns "Make sure the relevant pages and databases are shared with yo
 
 ```
 1. Preflight (≤60s)
-   - Fetch active_hypotheses from Notion → cache tags (e.g. cancer types, stains)
-   - Fetch watched_sources from Notion → build two scan-target lists:
-     - hf_orgs = [{name, url} for rows where Type=hf_org and Status=active]
-     - company_blogs = [{name, url} for rows where Type=company_blog and Status=active]
+   - Fetch active_hypotheses from Notion → cache tags
+   - Fetch watched_sources from Notion → build hf_orgs + company_blogs scan-target lists
    - Fetch local_context_snapshot from $LOCAL_CONTEXT_ENDPOINT_URL (optional)
-     → on failure: continue with empty snapshot, flag in run summary
    - Fetch recent_findings (last 90 days) from Notion findings DB → build seen-set:
-     - seen_urls = lowercased URLs from URL / huggingface / weights / dataset fields
-     - seen_names = lowercased Name (model name match when URLs differ)
-   - Fetch calibration set: last 20 rows with terminal Status (Not Relevant / Relevant / In Use)
-     → derive per-source / per-organization boost or penalty (see scoring-rubric.md)
-   - Send Telegram "🟡 OSS Radar started — N active hypotheses, M scan targets, K models in seen-set"
+     - seen_urls (lowercased URL/huggingface/weights/dataset fields)
+     - seen_names (lowercased Name)
+   - Fetch calibration set: last 20 rows with terminal Status → derive boosts
+   - Send Telegram "🟡 OSS Radar started — N hypotheses, M scan targets, K seen"
 
 2. Scan (sequential sub-agents — MANDATORY, not parallel)
 
-   Spawn sub-agents via Task tool, one per source category. Total: 8 sub-agents.
-
-   **CRITICAL — spawn sub-agents SEQUENTIALLY, one at a time.**
-   Do NOT spawn multiple Task tool calls in parallel (single message with multiple tool_use blocks).
-   Anthropic API has per-minute token rate limits; parallel sub-agents hit HTTP 429.
-
-   Sub-agent batches (see source-process.md for full details):
-     A. HuggingFace orgs — scan targets fetched from $NOTION_WATCHED_SOURCES_DS_ID (Type=hf_org)
-        + general HF search
-     B. arXiv (cs.CV, eess.IV, cs.LG with histopathology / "computational pathology" / "foundation model")
-     C. GitHub (topic:computational-pathology, "digital pathology" recently updated)
-     D. PapersWithCode + MICCAI/CVPR accepted lists
-     E. Company blogs — scan targets fetched from $NOTION_WATCHED_SOURCES_DS_ID (Type=company_blog)
-     F. Aggregators (grand-challenge, awesome-lists, PathBench leaderboard)
-     G. High-impact journals + news (Cell/Nature via Scholar+news-medical proxies — direct WebFetch fails 403)
-     H. Microsoft Research blog + Azure Foundry Labs + Google Health blog
+   8 sub-agents, one per source category. CRITICAL: spawn SEQUENTIALLY.
 
    Each sub-agent:
-     - Receives: scan window (default last 4 days), active_hypotheses tags, seen-set,
-       and (for A and E) the watched_sources list relevant to its category
-     - Scans its category per source-process.md
-     - Filters out URLs and names already in seen-set BEFORE returning
+     - Receives: scan window, active_hypotheses tags, seen-set, (A/E only) watched_sources list
+     - Apply DOMAIN FILTER (see above) — out-of-scope items dropped immediately, never returned
+     - Filter out URLs and names already in seen-set BEFORE returning
      - Returns compact JSON [{name, source, organization, url, hf_url, github_url, weights_url,
-       dataset_url, license, summary_raw, parameters, datasets_mentioned, openness_signals}, ...]
+       dataset_url, license, summary_raw, parameters, datasets_mentioned, openness_signals, domain_check}, ...]
+     - Returns count: candidates_found, filtered_out_of_scope, filtered_already_seen
      - Target: ≤800 tokens per sub-agent response
 
-   This takes ~10-15 minutes total instead of ~3-4 parallel, but avoids 429 errors.
-   If a sub-agent hits 429 internally, wait 60s and retry once.
-
-3. Aggregate + score
-   - Cross-category dedup (same model from HuggingFace + GitHub → merge into one finding)
-   - Apply calibration boost/penalty per source/organization (from Step 1 calibration set)
-   - For each unique candidate: compute score per scoring-rubric.md (0-19)
+3. Aggregate + score (classifier in main session)
+   - Cross-category dedup
+   - Apply DOMAIN FILTER again (defense in depth) — drop any out-of-scope item that slipped through
+   - For each remaining candidate: compute score per RUBRIC (inline below)
+     - Use EXACT component names listed in rubric. Do NOT invent components like "base", "recency".
+   - Apply calibration boost/penalty (from preflight)
    - Drop anything score < 4 (noise)
-   - Apply hard rules from scoring-rubric.md:
-     - Open code + open weights → hard min Relevance=High
-     - Code-only or paper-with-promised-code → Status=`To Research`, Notes marker [CODE_PROMISED]
-     - Closed model from major lab → Relevance ≤ Medium, "closed" flag in Summary
+   - Apply hard rules (inline below)
    - Determine Telegram trigger: raw score ≥ 8 OR (open code AND open weights)
 
-4. Local context matching (if local_context_snapshot was loaded)
-   For each finding:
-   - Pass finding metadata + local_context_snapshot to the LLM as context
-   - LLM generates one of: ✅ Applicable / ⚠️ Partial / ❌ Not applicable (with reason)
-   - Written to `Local Context Match` field
-   - If snapshot was unavailable → write `n/a — local context unavailable this run`
+4. Local context matching + applicability filter (CRITICAL)
+   For each remaining candidate:
+   - Pass finding metadata + local_context_snapshot to the LLM
+   - Assess Local Context Match: ✅ Applicable / ⚠️ Partial / ❌ Not applicable (with reason)
+
+   APPLICABILITY POLICY:
+     - Local Context = ✅ Applicable → write normally
+     - Local Context = ⚠️ Partial → write normally
+     - Local Context = ❌ Not applicable AND raw_score < 12 → DROP, do NOT write to Notion
+     - Local Context = ❌ Not applicable AND raw_score ≥ 12 → write with Status=Not Relevant
+       (high-score out-of-stack findings preserved as research signal but explicitly marked)
+     - Local context unavailable (endpoint failed) → skip this filter, write all candidates normally
 
 5. Write to Notion findings DB
-   - For each finding (score ≥ 4): create new page OR update existing page if matched in seen-set with new info
-   - All fields populated per "Recommended schema" below — empty fields are a failure mode
+   - For each surviving finding: create new page OR update existing if matched in seen-set with new info
+   - VALIDATE Notes field BEFORE writing (see "Notes validation" below)
+   - VALIDATE all required schema fields filled (Domain, Type, Source, Organization, Status, Relevance, Date Found, URL, Summary, Notes, Local Context Match)
 
 6. Telegram digest (only if Telegram-trigger count > 0)
-   - Build compact digest with top 3 hot findings expanded + rest as one-liners
-   - Send via direct Telegram API (Node.js fetch — no shell scripts in Paperclip runtime)
+   - Build digest with top 3 hot findings expanded + rest as one-liners
+   - VALIDATE every expanded block has all mandatory fields (see "Telegram validation")
+   - If a block can't be validated → DROP from digest, don't send abbreviated
 
 7. On any failure
-   - Send Telegram "⚠️ partial: <what worked, what didn't>"
-   - Update Paperclip issue accordingly
+   - Send Telegram "⚠️ partial: <what failed>"
 ```
-
-**Critical sub-agent rule**: do NOT process source categories inline in the main session. Without sub-agents the context balloons past 200k tokens (each WebFetch is 5-30KB raw). The Task tool is the only way to keep context under control.
 
 ## Token economy — critical for cost control
 
-This pipeline can spend $2-3 per run at Sonnet 4.5 prices if done naively (8 source categories × 30+ web fetches each). With the rules below it stays at $1.0-1.5. **Follow these or runs become expensive.**
-
 ### 1. Sub-agents per source category (mandatory)
-8 source categories → 8 sub-agents, sequential. Each gets fresh context, returns compact JSON.
+8 sequential sub-agents. Each gets fresh context, returns compact JSON.
 
 ### 2. Compact extractor pattern
-Within each sub-agent: when fetching a source page, **don't keep raw HTML in context**. Extract immediately to compact JSON (~200 tokens per candidate). The classifier in the main session sees only this.
+Extract immediately to compact JSON (~200 tokens per candidate). Don't keep raw HTML in context.
 
 ### 3. Dedup before LLM
-`seen_urls` and `seen_names` from preflight (Notion query, no separate DB). Each sub-agent receives these and filters BEFORE returning. Saves the entire scoring + Notion-write cost for already-known findings.
+seen_urls + seen_names passed to each sub-agent. Filter BEFORE returning.
 
-### 4. Prompt caching
-The skill body + scoring-rubric.md + source-process.md are **stable across runs**. The agent runtime should mark them as `cache_control: {type: "ephemeral"}`. Dynamic content (hypotheses snapshot, candidate list) goes AFTER cached blocks.
+### 4. Domain filter saves money
+Domain filter at extractor stage drops out-of-scope items before they consume scoring tokens. Radiology / cardiology / ECG papers should never reach the classifier.
 
-### 5. Tiered Cell/Nature handling
-Don't WebFetch cell.com / nature.com directly — they return 403 and waste a turn. Use Google Scholar + news-medical proxies (see source-process.md category G).
+### 5. Applicability filter saves Notion writes
+Step 4's applicability filter prevents low-score out-of-stack findings from polluting the findings DB.
 
-### 6. Don't reload supplementary skill files in sub-agents
-Pass relevant pieces of source-process.md into each sub-agent's input prompt instead of having the sub-agent re-fetch the file.
+### 6. Prompt caching
+Skill body marked `cache_control: {type: "ephemeral"}`.
 
-## Supplementary files (lazy-loaded when needed)
+### 7. Tiered Cell/Nature handling
+Don't WebFetch cell.com / nature.com directly (403). Use Scholar + news-medical proxies (see source-process.md G).
 
-- **`scoring-rubric.md`** — 0-19 scoring formula + hard rules + thresholds + anchor examples. Load in Step 3 (classify).
-- **`source-process.md`** — 8 categories of sources with URLs, scan rules, extractor patterns, anti-patterns. Load when spawning sub-agents in Step 2.
+---
 
-## Recommended Notion schema for the findings DB
+# SCORING RUBRIC (INLINE — canonical version, agent MUST follow exactly)
 
-Create the findings Notion DB with the following properties. **Property names are case-sensitive in the Notion API.** If you rename any of them, update the keys in the skill's output-write step accordingly.
+> **Why inline:** This rubric is the most important part of the skill. To prevent the agent from improvising or inventing scoring components, it lives here in SKILL.md (always loaded), NOT in a lazy-loaded supplementary file.
+
+## Score range: 0–21 (raw, before hard-rule modifiers)
+
+Components break down as:
+- Relevance components: max +11 (5 + 3 + 2 + 1)
+- Openness components: max +7 (2 + 2 + 2 + 1)
+- Technical components: max +3 (2 + 1)
+- Calibration: ±2 (signed adjustment)
+
+## Relevance — max +11
+
+| Criterion | Points |
+|---|---|
+| **hypothesis_match** — finding directly matches a tag from your active hypotheses (e.g. specific biomarker, tumor type, artefact category) | +5 |
+| **annotation_match** — finding's task aligns with an annotation type you care about (e.g. segmentation, mitosis count, scoring) | +3 |
+| **localization_match** — finding's organ/tissue matches your area (e.g. mammary, GI, lung, prostate, lymph) | +2 |
+| **stain_match** — finding uses a stain you work with (e.g. H&E, specific IHC marker) | +1 |
+
+If hypothesis_match = 0 (no direct tag match), points from annotation/localization/stain can still accumulate, but see Hard Rule 0 below.
+
+## Openness — max +7
+
+| Criterion | Points |
+|---|---|
+| **openness.code** — public GitHub repo with real code (not paper-only) | +2 |
+| **openness.weights** — weights downloadable (HuggingFace, direct link) | +2 |
+| **openness.dataset** — training/eval data downloadable | +2 |
+| **openness.license** — permissive (MIT / Apache 2.0 / CC-BY) on top of open code/weights | +1 |
+
+## Technical — max +3
+
+| Criterion | Points |
+|---|---|
+| **technical.sota** — SOTA on a pathology benchmark (Patho-Bench, PathBench, EVA, HEST) | +2 |
+| **technical.novel_arch** — foundation model or novel architecture (not yet-another-UNet) | +1 |
+
+## Calibration — ±2 (signed)
+
+Derived from last 20 findings with terminal Status:
+- Source appeared 5+ times as `Not Relevant` → −1
+- Organization appeared 5+ times as `Not Relevant` → −1
+- Source + Domain combo appeared 3+ times as `Relevant`/`In Use` → +1
+- Architecture family identical to an `In Use` entry → +1
+
+Sum is capped at ±2 total.
+
+## MANDATORY scoring header in Notes (verbatim format)
+
+Every Notes field MUST start with the following block. Use these EXACT component names. Do NOT invent components like "base", "recency", "freshness", "popularity". Each component must appear; write 0 if N/A.
+
+```
+[score=X/21]
+- hypothesis_match: N (of +5)
+- annotation_match: N (of +3)
+- localization_match: N (of +2)
+- stain_match: N (of +1)
+- openness.code: N (of +2)
+- openness.weights: N (of +2)
+- openness.dataset: N (of +2)
+- openness.license: N (of +1)
+- technical.sota: N (of +2)
+- technical.novel_arch: N (of +1)
+- calibration: ±N
+
+hypothesis_tag_matched: <tag name from active hypotheses, or "—">
+match: annotation=<type>, localization=<organ>, stain=<stain>
+rationale: <1-2 sentences explaining the score>
+```
+
+If you find yourself writing "base=N" or "recency=N" — STOP. Those aren't in the rubric. Use the components above only.
+
+## Thresholds → Notion classification
+
+| Raw score | Notion Status | Notion Relevance |
+|---|---|---|
+| ≥ 8 | `Review` | `High` |
+| 4–7 | `New` | `Medium` |
+| < 4 | (drop — don't write) | — |
+
+## Hard rules (override default classification)
+
+### Hard Rule 0 — Hypothesis-zero floor
+If `hypothesis_match = 0` AND total raw score < 8 AND not a "full open stack" → DROP, do not write. Pure openness without hypothesis match is interesting only at very high score.
+
+### Hard Rule 1 — Full open stack → minimum Relevance=High
+If `openness.code = +2` AND `openness.weights = +2` (both open):
+- Notion `Relevance` = `High` (even if raw score < 8)
+- Notion `Status` = `Review`
+- Telegram: ALWAYS send (overrides raw-score threshold)
+- BUT: still subject to Hard Filter (domain) and Applicability Filter (Step 4)
+
+### Hard Rule 2 — Closed model from major lab → Relevance ≤ Medium
+If finding is closed (no public weights, no public code) but from a major lab (PAIGE, Owkin, Bioptimus, major pharma R&D):
+- Notion `Relevance` ≤ `Medium` (downgrade even if score ≥ 8)
+- Notion `Status` = `Review`
+- Summary notes: "🔒 closed — paper available, weights/code not released"
+- Telegram: send if raw score ≥ 8
+
+### Hard Rule 3 — Code-promised paper
+If paper says "code coming soon" / "weights upon publication":
+- Notion `Status` = `To Research`
+- Notion `Relevance` per threshold
+- Add to Notes: `[CODE_PROMISED: <ETA or "unknown">]` exactly
+- Telegram: send if raw score ≥ 8
+
+### Hard Rule 4 — Dataset-only release
+If finding is purely a dataset (no model):
+- Notion `Type` = `Dataset`
+- Openness criteria: open data = +2, license = +1
+
+## Telegram trigger (UNAMBIGUOUS)
+
+A finding goes to Telegram digest if EITHER:
+- raw score ≥ 8 (before hard-rule modifiers), OR
+- open code AND open weights (full open stack)
+
+Status/Relevance modifiers DO NOT block Telegram. Domain Filter and Applicability Filter DO block (out-of-domain or fully not-applicable findings never reach Telegram because they never reach Step 6).
+
+## Anchor examples
+
+### Example: Strong full-open release in hypothesis area
+A foundation model from a tracked lab, code+weights, matches Tumor hypothesis.
+- hypothesis_match=+5, annotation_match=+3, localization_match=+2 (any), stain_match=+1 (H&E)
+- openness.code=+2, openness.weights=+2, openness.dataset=+1 (partial), openness.license=+0 (CC-BY-NC)
+- technical.sota=+2, technical.novel_arch=+1
+- calibration=+1 (lab seen as `In Use` before)
+- **Raw: 19/21** → Status=Review, Relevance=High, Telegram=YES
+
+### Example: Radiology paper that mentions "tumor"
+Chest X-ray model for lung tumor detection.
+- **DOMAIN FILTER applies → DROP at extractor stage. Never reaches scoring.**
+
+### Example: Pathology foundation model but requires ST input
+Spatial transcriptomics + histology FM (e.g. STORM).
+- Passes domain filter (uses histology)
+- hypothesis_match=0 (no ST hypothesis), annotation_match=+3 (tumor), localization_match=+2, stain_match=+1
+- openness: paper-only +0
+- technical.novel_arch=+1
+- **Raw: 7/21**
+- Local Context Match: ❌ Not applicable (we don't have ST input pipeline)
+- raw_score (7) < 12 → APPLICABILITY FILTER drops it. Not written to Notion.
+
+### Example: Closed model from major lab, matches hypothesis
+Hypothetical PAIGE closed release, matches Tumor hypothesis.
+- hypothesis_match=+5, annotation_match=+3, localization_match=+2, stain_match=+1
+- openness: all closed +0
+- technical.sota=+2, technical.novel_arch=+1
+- **Raw: 14/21**
+- Hard Rule 2: closed from major lab → Relevance=Medium (not High despite score)
+- Telegram: YES (raw ≥ 8)
+
+---
+
+# RECOMMENDED NOTION SCHEMA — findings DB
+
+Create the findings Notion DB with the following properties. **Property names are case-sensitive in the Notion API.**
 
 | Property | Type | Notes |
 |---|---|---|
-| `Name` | title | Model/paper name (required title property) |
-| `Type` | select | Options: `Model`, `Paper`, `Approach`, `Dataset`, `Benchmark` |
-| `Domain` | multi_select | Options (suggested): `Histology`, `Cytology`, `CDI`, `Oncology`, `General PathAI`, `Artifacts` |
-| `Source` | select | Options: `HuggingFace`, `GitHub`, `ArXiv`, `Company Blog`, `Conference`, `PapersWithCode` |
-| `Organization` | select | Options (extend as needed): `MahmoodLab`, `Bioptimus`, `PAIGE`, `Owkin`, `Google`, `Microsoft`, `Lunit`, `KatherLab`, `Other` |
-| `Status` | select | Options: `New`, `Review`, `Relevant`, `Not Relevant`, `To Research`, `In Use` |
-| `Relevance` | select | Options: `High`, `Medium`, `Low` |
+| `Name` | title | Model/paper name |
+| `Type` | select | `Model` / `Paper` / `Approach` / `Dataset` / `Benchmark` |
+| `Domain` | multi_select | `Histology` / `Cytology` / `CDI` / `Oncology` / `General PathAI` / `Artifacts` |
+| `Source` | select | `HuggingFace` / `GitHub` / `ArXiv` / `Company Blog` / `Conference` / `PapersWithCode` |
+| `Organization` | select | Extend as needed |
+| `Status` | select | `New` / `Review` / `Relevant` / `Not Relevant` / `To Research` / `In Use` |
+| `Relevance` | select | `High` / `Medium` / `Low` |
 | `Date Found` | date | ISO date (today) |
-| `Parameters` | text | N parameters, training compute, architecture brief |
+| `Parameters` | text | N params, training compute, architecture brief |
 | `Datasets` | text | Training datasets with sizes, OR `n/a (private)` |
-| `URL` | url | Canonical source URL (paper or repo) |
-| `HuggingFace` | url | HF URL (empty if N/A) |
-| `Weights` | url | Direct link to weights (empty if not open) |
-| `Dataset URL` | url | Dataset URL (empty if not open) |
-| `Summary` | text | 2-3 sentences: what it is, what's different, key numbers |
-| `Notes` | text | **Rich analysis — see template below. MANDATORY to fill fully.** |
-| `Local Context Match` | text | Match against your local inventory — see template. MANDATORY. |
+| `URL` | url | Canonical source URL |
+| `HuggingFace` | url |  |
+| `Weights` | url |  |
+| `Dataset URL` | url |  |
+| `Summary` | text | 2-3 sentences |
+| `Notes` | text | **Rich analysis — see validation below. MANDATORY full template.** |
+| `Local Context Match` | text | **Match against your inventory — see validation below. MANDATORY.** |
 
-### `Notes` field — structured rich analysis (MANDATORY)
+## `Notes` field — MANDATORY validation (run before write)
 
-Empty Notes is a failure. Use this template — write `n/a — <reason>` for sub-sections where data is genuinely unknown, but never leave them empty:
+The Notes field MUST contain ALL of these sections in order:
 
 ```
-[score=X/19] hypothesis_match: <tag from active hypotheses or "—">
-match: annotation=<task type>, localization=<organ>, stain=<H&E/IHC/etc>
-rationale: <1-2 lines — why this score>
+[score breakdown header — exact format from rubric above]
 
 📦 Openness:
-- code: ✅ <github URL> | ❌ closed | ⏳ promised <ETA>
-- weights: ✅ <HF URL> | ❌ closed | ⏳ promised <ETA>
+- code: ✅ <URL> | ❌ closed | ⏳ promised <ETA>
+- weights: ✅ <URL> | ❌ closed | ⏳ promised <ETA>
 - dataset: ✅ <URL> | ❌ private | ⏳ promised
 - license: <name, commercial use Y/N>
 
@@ -261,7 +431,7 @@ rationale: <1-2 lines — why this score>
 ⚠️ Clinical limitations / gaps:
 - <what's NOT covered>
 - <missing classes>
-- <missing validation — no external / no prospective>
+- <missing validation>
 
 🎯 Relevance to your work:
 - hypothesis: <specific hypothesis name or "—">
@@ -270,24 +440,36 @@ rationale: <1-2 lines — why this score>
 [CODE_PROMISED: <ETA or "unknown">]    ← add ONLY if paper promises code but hasn't released
 ```
 
-### `Local Context Match` field — comparison to your local inventory (MANDATORY)
+### Validation checklist (run before EVERY Notion write)
 
-Templates depend on whether the local context endpoint is configured + responding:
+- [ ] score breakdown header present with all 11 components (no invented ones)?
+- [ ] 📦 Openness section present with all 4 sub-items?
+- [ ] 📊 Population section present with at least 3 sub-items?
+- [ ] ⚠️ Limitations section present with at least 1 bullet?
+- [ ] 🎯 Relevance section present with hypothesis + value?
 
-**Endpoint configured and applicable:**
+If ANY check fails → regenerate Notes before writing. Empty or abbreviated Notes is a HARD failure mode — Kristina has flagged this explicitly as unacceptable. Do not write to Notion until all checks pass.
+
+For sub-sections where data is genuinely unknown, write `n/a — <one-sentence reason>` but NEVER omit the section.
+
+## `Local Context Match` field — MANDATORY validation
+
+Templates depend on whether local context endpoint was loaded:
+
+**Endpoint loaded, applicable:**
 ```
 ✅ Applicable: <what overlaps from your inventory>
-   Use case: <fine-tune classification head / use as eval set / compare against your current SOTA>
+   Use case: <fine-tune classification head / use as eval set / compare against SOTA>
 ```
 
-**Endpoint configured, no overlap:**
+**Endpoint loaded, no overlap:**
 ```
-❌ Not applicable: <reason — e.g. "model is on molecular data, your inventory is H&E/IHC slides only">
+❌ Not applicable: <reason — e.g. "model requires spatial transcriptomics on input, your inventory is H&E/IHC slides only">
 ```
 
-**Endpoint configured, partial match:**
+**Endpoint loaded, partial:**
 ```
-⚠️ Partial: <what works — e.g. "tumor data good for backbone fine-tune, but IHC HER2 doesn't cover their multiplex">
+⚠️ Partial: <what works / what doesn't>
 ```
 
 **Endpoint not configured or failed:**
@@ -295,7 +477,7 @@ Templates depend on whether the local context endpoint is configured + respondin
 n/a — local context unavailable this run
 ```
 
-## Telegram digest (only if Telegram-trigger count K > 0)
+## Telegram digest — MANDATORY validation
 
 **API call** (Paperclip env has no `curl` — use Node.js `fetch`):
 
@@ -304,70 +486,65 @@ POST https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage
 Content-Type: application/json
 Body: {
   "chat_id": "{TELEGRAM_CHAT_ID}",
-  "text": "<message body — see template below>",
+  "text": "<message body>",
   "disable_web_page_preview": true
 }
 ```
 
-Do NOT set `parse_mode` — send as plain text. Telegram's markdown parser breaks on `[`, `_`, `(`, etc. that appear in paper titles and URLs.
+Do NOT set `parse_mode` — plain text only.
 
-If `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` env vars are missing → skip Telegram silently (Notion is primary sink). Log `telegram_skipped: not configured` in run summary.
-
-### Telegram trigger (UNAMBIGUOUS)
-
-A finding goes to Telegram if EITHER:
-- `raw score ≥ 8` (before hard-rule modifiers to Status/Relevance), OR
-- `open code AND open weights` (full open stack — always notify regardless of score)
-
-Status/Relevance modifiers from hard rules **do not block** Telegram. If a finding gets Relevance=Medium due to being closed but raw score=14 — it STILL goes to Telegram (with 🔒 closed marker).
-
-### Telegram message body template (plain text)
+### Telegram message body — mandatory template
 
 ```
 🔬 OSS Radar — <K> hot findings
 
-1. <Model Name> (<Source>) score=X/19
+1. <Model Name> (<Source>) score=X/21
    match: <hypothesis tag>, <annotation>, <localization>
    📦 code: ✅/❌  weights: ✅/❌  data: ✅/❌  license: <short>
-   <one-line summary with key number>
-   🎯 Value: <fine-tune / eval / replace X>
+   <one-line summary with key number — what is this, what's special>
+   🎯 Value: <fine-tune / eval / replace / research signal>
    📄 paper/repo: <URL>
    📋 Notion: <Notion page URL>
 
-2. <Model Name 2> (<Source>) score=Y/19
+2. <Model Name 2> (<Source>) score=Y/21
    ...
-
-(up to top 3 expanded)
-
-Plus N more in Notion: <URL of findings DB filtered to today>
-Run: <YYYY-MM-DD HH:MM TZ>
 ```
 
-Remaining hot findings get one-line entries:
-```
-4. <Name> score=X — see Notion: <URL>
-```
+(Up to top 3 expanded. Remaining hot findings: one-line `4. <Name> score=X — see Notion: <URL>`.)
 
-**Mandatory fields in each expanded block**: name, source, score, code/weights/data flags, value, Notion URL.
+### Telegram validation checklist (run BEFORE sending each expanded block)
 
-### Run status (Telegram)
+- [ ] Name + Source present?
+- [ ] score=X/21 present?
+- [ ] match line present (with hypothesis tag OR "—", annotation, localization)?
+- [ ] 📦 line with all 4 flags (code/weights/data/license)?
+- [ ] One-line summary present (NOT empty)?
+- [ ] 🎯 Value line present (NOT empty)?
+- [ ] paper/repo URL present?
+- [ ] Notion page URL present?
 
-Always sent at run start:
+If ANY check fails for an expanded block → DROP this finding from Telegram digest (it still goes to Notion). Do NOT send abbreviated/incomplete messages — better to skip one entry than confuse Kristina with broken cards.
+
+### Run status (Telegram) — always sent
+
+Start:
 ```
 🟡 OSS Radar started
-Active hypotheses: <list of tags>
-Seen-set: <N> models in last 90 days
+Active hypotheses: <list>
+Watched sources: <N hf_orgs + M blogs>
+Seen-set: <K> models in last 90 days
 Local context: ✅ loaded | ⚠️ unavailable | — not configured
 ```
 
-Always sent at end:
+End:
 ```
 ✅ OSS Radar done — <K> hot, <M> medium-relevance (total <T> findings)
-Telegram digest: <yes if K>0 else "no hot findings this run">
+Filtered: <X> out-of-domain, <Y> not-applicable
+Telegram digest: <yes/no>
 Notion: <URL filtered to today>
 ```
 
-Or on partial failure:
+Partial failure:
 ```
 ⚠️ OSS Radar partial — <what worked, what didn't>
 ```
@@ -375,10 +552,13 @@ Or on partial failure:
 ## Constraints
 
 - **Never invent.** If a source returned nothing, log it. Don't guess parameters/datasets/etc.
-- **Never duplicate.** Dedup via Notion seen-set happens in every sub-agent BEFORE classification.
-- **Fill every field.** Empty `Notes` or `Local Context Match` is a failure mode — write `n/a — <reason>` if data genuinely unknown.
-- **Output language.** Match the dominant language of your configured Notion DBs. If hypotheses are in Russian, write Notes/Summary in Russian. If English, English. URLs and proper nouns stay in their original form.
-- **Per-agent monthly budget** is a hard cap set in Paperclip — respect it. Expect ~$15-25/month at twice-weekly cadence.
+- **Never invent scoring components.** Use ONLY the 11 components from the rubric. No "base", "recency", etc.
+- **Never duplicate.** Dedup via Notion seen-set in every sub-agent BEFORE classification.
+- **Fill every Notes section.** Empty/abbreviated Notes = HARD failure. Write `n/a — <reason>` if truly unknown, never omit.
+- **Domain filter is HARD.** Out-of-pathology findings never reach Notion. No exceptions.
+- **Applicability filter is GRADED.** Low-score not-applicable = drop. High-score not-applicable = write with Not Relevant.
+- **Output language.** Match dominant language of your Notion DBs (Russian if hypotheses are in Russian, English otherwise). URLs and proper nouns stay in original form.
+- **Per-agent monthly budget** — respect Paperclip cap. Expect ~$15-25/month at twice-weekly cadence.
 
 ## Failure modes
 
@@ -387,33 +567,34 @@ Or on partial failure:
 | Notion API auth fails (401/500) | Halt. Telegram "🔴 OSS Radar: Notion auth failed". |
 | Hypotheses DB returns 0 active rows | Halt. Telegram "🔴 OSS Radar: no active hypotheses configured". |
 | Watched sources DB unreachable | Halt. Telegram "🔴 OSS Radar: can't read watched sources DB". |
-| Watched sources DB has 0 active rows | Continue. Skip categories A and E silently. Note in run summary "no watched sources configured". |
-| Local context endpoint fails (timeout/500) | Continue. Write "n/a — local context unavailable" in `Local Context Match`. Note in run summary. |
+| Watched sources DB has 0 active rows | Continue. Skip categories A and E. Note in run summary. |
+| Local context endpoint fails | Continue. Write "n/a — local context unavailable" in field. Note in summary. |
 | Findings DB unreachable | Halt. Telegram "🔴 OSS Radar: can't read seen-set, refuse to risk duplicates". |
-| Single source category fails (timeout/404) | Skip category, continue with others. Log "X unavailable" in run digest. |
+| Single source category fails | Skip category, continue. Log in run digest. |
 | Anthropic rate-limit (429) | Wait 60s, retry once. Second fail → halt. |
-| Telegram notify fails | Continue. Notion is primary sink. Log to run summary. |
-| All sub-agents return 0 findings | Send Telegram "✅ Quiet run — 0 new findings". |
-| Sub-agent crash (>2 retries) | Skip that source category, continue. Telegram "⚠️ category X failed". |
+| Telegram notify fails | Continue. Notion is primary sink. |
+| All sub-agents return 0 findings | Telegram "✅ Quiet run — 0 new findings". |
+| Notes validation fails after 2 regenerations | Skip this finding, log warning in summary. |
+| Domain filter catches >50% of candidates | Continue but log. May indicate scan targets need tuning. |
 
 ## Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `NOTION_API_KEY` | yes | Notion Personal Access Token or Internal Integration secret |
-| `NOTION_HYPOTHESES_DS_ID` | yes | Data source ID of your active-hypotheses DB |
-| `NOTION_FINDINGS_DS_ID` | yes | Data source ID of your findings DB (read for dedup, write new entries) |
-| `NOTION_WATCHED_SOURCES_DS_ID` | yes | Data source ID of your watched-sources DB (HF orgs + company blogs to scan). Schema: see "Configuration sources" |
-| `HYPOTHESES_ACTIVE_STATUSES` | no | Comma-separated status values that count as active (default `Dev,In progress,To do,Review`) |
-| `HYPOTHESES_TAGS_COLUMN` | no | Column name in hypotheses DB holding the topic tags (default `Models`) |
-| `LOCAL_CONTEXT_ENDPOINT_URL` | no | HTTP GET URL returning your local domain inventory JSON. If unset, `Local Context Match` becomes `n/a` |
-| `TELEGRAM_BOT_TOKEN` | no | Telegram bot token. If unset, Telegram digest is skipped (Notion-only mode) |
-| `TELEGRAM_CHAT_ID` | no | Telegram chat to push digest to |
-| `SCAN_WINDOW_DAYS` | no | How many days back each source scans (default `4`) |
+| `NOTION_API_KEY` | yes | Notion PAT or Internal Integration secret |
+| `NOTION_HYPOTHESES_DS_ID` | yes | Data source ID of hypotheses DB |
+| `NOTION_FINDINGS_DS_ID` | yes | Data source ID of findings DB (read + write) |
+| `NOTION_WATCHED_SOURCES_DS_ID` | yes | Data source ID of watched-sources DB |
+| `HYPOTHESES_ACTIVE_STATUSES` | no | CSV active statuses (default `Dev,In progress,To do,Review`) |
+| `HYPOTHESES_TAGS_COLUMN` | no | Tags column name (default `Models`) |
+| `LOCAL_CONTEXT_ENDPOINT_URL` | no | HTTP GET URL for local domain inventory JSON |
+| `TELEGRAM_BOT_TOKEN` | no | Telegram bot token (skip Telegram if unset) |
+| `TELEGRAM_CHAT_ID` | no | Telegram chat ID |
+| `SCAN_WINDOW_DAYS` | no | Default `4` |
 
 ## See also
 
-- Methodology: `scoring-rubric.md` (this directory)
 - Scan procedure: `source-process.md` (this directory)
-- Hypothesis configuration: lives in your Notion DB (set by env var, not by this skill)
-- Local context provider: optional HTTP service you build separately (returns your domain inventory as JSON)
+- Scoring rubric reference (with examples): `scoring-rubric.md` (this directory) — canonical version is inline above, this file is reference only
+- Hypothesis config: lives in your Notion DB
+- Local context provider: optional HTTP service you build separately

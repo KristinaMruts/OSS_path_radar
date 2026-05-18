@@ -1,160 +1,132 @@
-# OSS Radar Scoring Rubric
+# OSS Radar Scoring Rubric — Reference
 
-Score range: **0–19** (raw, before hard-rule modifiers).
+> **⚠️ The canonical rubric is INLINE in `SKILL.md`** (sections "SCORING RUBRIC" and "Hard rules"). That version is what the agent loads and follows. This file exists as a longer reference with worked examples — use it for human review, calibration discussions, and onboarding.
 
-Score determines:
-1. Notion `Status` (default — see Thresholds)
-2. Notion `Relevance` (default — see Thresholds, can be raised/lowered by hard rules)
-3. Telegram trigger (raw score ≥ 8 OR open code+weights)
+## Score range: 0–21 (raw, before hard-rule modifiers)
 
-## Relevance (clinical / business fit) — max +11
+Total = sum of 11 components + calibration (±2).
 
-| Criterion | Points |
-|---|---|
-| **Direct hypothesis match** — finding directly matches a tag from your configured active hypotheses (e.g. specific biomarker, tumor type, artefact category) | +5 |
-| **Annotation type match** — finding's task aligns with a domain you care about (e.g. segmentation, detection, scoring) | +3 |
-| **Localization match** — finding's organ/tissue matches your area (e.g. mammary, reproductive, GI, lung, prostate, lymph) | +2 |
-| **Stain match** — finding uses a stain you work with (e.g. H&E, specific IHC marker) | +1 |
+| Bucket | Max | Components |
+|---|---|---|
+| Relevance | +11 | hypothesis_match (+5), annotation_match (+3), localization_match (+2), stain_match (+1) |
+| Openness | +7 | openness.code (+2), openness.weights (+2), openness.dataset (+2), openness.license (+1) |
+| Technical | +3 | technical.sota (+2), technical.novel_arch (+1) |
+| Calibration | ±2 | signed adjustment from findings history |
 
-A direct match to one of your hypothesis tags is the strongest signal. If a finding matches multiple criteria (e.g. exact biomarker + matching organ + H&E), sum them all (+5+2+1=+8 base).
+**These component names are CANON.** The agent MUST use these exact names in the Notes scoring header. No inventing "base", "recency", "freshness", etc.
 
-## Openness — max +7 (critical — открытый стек = реально можно использовать)
-
-| Criterion | Points |
-|---|---|
-| **Open code** — public GitHub repo with real code (not paper-only) | +2 |
-| **Open weights** — weights downloadable (HuggingFace, direct link) | +2 |
-| **Open dataset** — training/eval data downloadable | +2 |
-| **Permissive license** — MIT / Apache 2.0 / CC-BY on top of open code/weights | +1 |
-
-Openness is heavily weighted because closed models (private weights, commercial-only) are unactionable for experimentation. You can read the paper but can't fine-tune or evaluate.
-
-## Technical — max +3
-
-| Criterion | Points |
-|---|---|
-| **SOTA on a pathology benchmark** (Patho-Bench / PathBench / EVA / HEST / similar) | +2 |
-| **Foundation model or novel architecture** (not yet-another-UNet) | +1 |
-| **Language compatibility note** — if model has language-specific gating (e.g. report generation in English only), flag in Notes | +0 |
-
-## Calibration boost/penalty (applied BEFORE thresholds)
-
-From Step 0 preflight (last 20 rows in findings DB with terminal statuses):
-
-- If finding's `Source` appeared 5+ times as `Not Relevant` recently → **−1**
-- If finding's `Organization` appeared 5+ times as `Not Relevant` recently → **−1**
-- If finding's `Source` + `Domain` combo appeared 3+ times as `Relevant`/`In Use` recently → **+1**
-- If finding looks identical to an `In Use` entry (same architecture family) → **+1**
-
-Calibration adjustments are capped at ±2 total. Track which adjustments fired in the `rationale:` line of Notes.
-
-## Thresholds → Notion classification
+## Thresholds
 
 | Raw score | Notion Status | Notion Relevance |
 |---|---|---|
 | ≥ 8 | `Review` | `High` |
 | 4–7 | `New` | `Medium` |
-| < 4 | (drop — don't write to Notion) | — |
+| < 4 | (drop) | — |
 
-## Hard rules (OVERRIDE thresholds for Notion Status/Relevance)
+## Hard rules
 
-These modify Notion classification but **DO NOT affect Telegram trigger** (Telegram uses raw score, unmodified).
+- **Rule 0 — Hypothesis-zero floor**: if `hypothesis_match=0` AND raw < 8 AND not full open stack → DROP
+- **Rule 1 — Full open stack**: code+weights both open → minimum `Relevance=High`, Telegram=always
+- **Rule 2 — Closed major lab**: closed code+weights from PAIGE/Owkin/Bioptimus/etc. → `Relevance` ≤ `Medium`, Telegram if raw≥8
+- **Rule 3 — Code-promised**: paper says "code coming soon" → `Status=To Research`, marker `[CODE_PROMISED: <ETA>]`
+- **Rule 4 — Dataset-only**: pure dataset → `Type=Dataset`, openness criteria become (open data +2, license +1)
 
-### Rule 1: Full open stack → minimum Relevance=High
+## Applicability filter (post-scoring, applied at pipeline Step 4)
 
-If finding has **open code AND open weights** (both ✅):
-- Notion `Relevance` = `High` (even if raw score < 8)
-- Notion `Status` = `Review`
-- Telegram: ALWAYS send (overrides raw-score threshold)
-- Rationale: full open stack is the rarest, most actionable signal
+If Local Context Match = ❌ Not applicable:
+- raw_score < 12 → DROP
+- raw_score ≥ 12 → write with Status=Not Relevant
 
-### Rule 2: Closed model from major lab → Relevance ≤ Medium
+## Telegram trigger
 
-If finding is closed (no public weights, no public code) but comes from a major lab (PAIGE, Owkin, Bioptimus, major pharma R&D):
-- Notion `Relevance` ≤ `Medium` (downgrade from High even if score ≥ 8)
-- Notion `Status` = `Review`
-- Note in `Summary`: "🔒 closed — paper available, weights/code not released"
-- Telegram: send if raw score ≥ 8 (competitive intel — important to know about)
-
-### Rule 3: Code-promised paper → Status=To Research, marker
-
-If paper says "code coming soon" / "code will be released" / "weights upon publication":
-- Notion `Status` = `To Research`
-- Notion `Relevance` per threshold
-- Add to `Notes`: `[CODE_PROMISED: <ETA or "unknown">]` exactly (case-sensitive, brackets included)
-- Telegram: send if raw score ≥ 8
-- Rationale: a separate code-promise-tracker skill (if you build one) can watch for these markers and re-check weekly
-
-### Rule 4: Dataset-only release → Type=Dataset
-
-If finding is purely a new dataset release (no model):
-- Notion `Type` = `Dataset`
-- Score still applies per rubric (openness criteria become: open data = +2, license = +1)
-- Local context matching becomes critical — applicable datasets should bubble up
-
-## Telegram trigger (UNAMBIGUOUS — restate)
-
-A finding goes to Telegram digest if EITHER:
-- raw score ≥ 8 (before any hard-rule modifiers to Status/Relevance), OR
+Goes to digest if EITHER:
+- raw score ≥ 8, OR
 - open code AND open weights (full open stack)
 
-A finding with raw score 5 and full open stack → Telegram ✅
-A finding with raw score 14 but closed → Telegram ✅ (still hot competitive intel)
-A finding with raw score 7 and code-only (no weights) → Telegram ❌ (close-but-not-quite, lives in Notion only)
+---
 
 ## Anchor examples (calibration sanity checks)
 
-### Example 1: Strong foundation model release with full open stack
+These examples ground the rubric for human readers. The skill applies the rubric programmatically; these are NOT loaded by the agent.
 
-Hypothetical: a major lab releases a new ViT-based pathology FM on HuggingFace with code + weights.
+### Example 1: Strong full-open release in hypothesis area
 
-- Hypothesis tag match: yes (e.g. tumor segmentation) (+5)
-- Annotation type match (tumor): (+3)
-- Localization: any organ (+2)
-- Stain: H&E (+1)
-- Open code: ✅ (+2), open weights: ✅ (+2), open dataset: partial (+1)
-- License: CC-BY-NC (no commercial → +0)
-- Foundation model (+1), SOTA on EVA benchmark (+2)
-- **Raw score: 19/19**
-- Calibration: same lab seen 3× as `In Use` → +1 (cap at +2, no change)
-- Notion: Status=Review, Relevance=High
-- Telegram: YES (both raw≥8 AND open stack)
+A foundation model from a tracked lab, code+weights, matches Tumor hypothesis.
 
-### Example 2: Random arXiv preprint on an irrelevant cancer type, no code
+- hypothesis_match=+5, annotation_match=+3, localization_match=+2, stain_match=+1
+- openness.code=+2, openness.weights=+2, openness.dataset=+1 (partial), openness.license=+0 (CC-BY-NC)
+- technical.sota=+2, technical.novel_arch=+1
+- calibration=+1 (lab seen as `In Use` before)
+- **Raw: 19/21** → Status=Review, Relevance=High, Telegram=YES (both raw≥8 AND full open stack)
 
-- Hypothesis tag match: none (—)
-- Annotation type (tumor): (+3)
-- Localization: rare cancer not in your scope (—)
-- Stain: H&E (+1)
-- Open code: paper-only (+0), weights: ❌ (+0)
-- Foundation model: no, UNet variant (+0)
-- **Raw score: 4/19**
-- Calibration: arXiv seen 8× as `Not Relevant` → −1
-- Adjusted score: 3 → DROP (don't write to Notion)
+### Example 2: Radiology paper that mentions "tumor"
 
-### Example 3: Closed model from major lab
+Chest X-ray model for lung tumor detection.
 
-Hypothetical: PAIGE releases a closed model paper, no public weights.
+- **DOMAIN FILTER applies → DROP at extractor stage.** Never reaches scoring.
+- Rationale: out-of-domain (radiology, not pathology)
 
-- Hypothesis tag match (tumor): (+5)
-- Annotation type (tumor): (+3), localization: any (+2), stain: H&E (+1)
-- Open code: ❌ (+0), weights: ❌ (+0), dataset: ❌ (+0)
-- Foundation model (+1), SOTA (+2)
-- **Raw score: 14/19**
-- Hard rule 2: closed from major lab → Relevance=Medium (not High despite score)
-- Notion: Status=Review, Relevance=Medium, Summary notes "🔒 closed"
+### Example 3: Pathology FM but requires ST input (STORM-like)
+
+Spatial transcriptomics + histology FM.
+
+- Passes domain filter (uses histology as primary modality)
+- hypothesis_match=0 (no ST hypothesis configured), annotation_match=+3 (tumor), localization_match=+2, stain_match=+1
+- openness: paper-only +0
+- technical.novel_arch=+1
+- **Raw: 7/21**
+- Local Context Match: ❌ Not applicable (no ST pipeline in local stack)
+- raw_score (7) < 12 → **APPLICABILITY FILTER drops it.** Not written to Notion.
+
+### Example 4: Closed major-lab model, hypothesis match
+
+Hypothetical PAIGE closed release, matches Tumor hypothesis.
+
+- hypothesis_match=+5, annotation_match=+3, localization_match=+2, stain_match=+1
+- openness: all closed +0
+- technical.sota=+2, technical.novel_arch=+1
+- **Raw: 14/21**
+- Hard Rule 2: closed from major lab → Notion `Relevance=Medium` (downgrade)
+- Local Context Match: ⚠️ Partial (methodology applicable, weights not) → write normally
 - Telegram: YES (raw ≥ 8)
 
-### Example 4: Niche tool with full open stack but obscure benchmark
+### Example 5: Niche full-open artefact detector
 
-Hypothetical: a small lab releases an artefact-detection model on HuggingFace with code + Apache 2.0.
+Small lab releases artefact-detection model on HuggingFace with code + Apache 2.0.
 
-- Hypothesis tag match (artefacts): (+5)
-- Annotation type (artefacts): (+3), localization: any (+2), stain: any (+1)
-- Open code: ✅ (+2), weights: ✅ (+2), dataset: ⏳ promised (+0)
-- License: Apache 2.0 (+1)
-- Not SOTA but novel approach (+1)
-- **Raw score: 17/19**
-- Calibration: same lab seen 2× as `Relevant` → +1 (cap at +2, no change)
-- Notion: Status=Review, Relevance=High
-- Telegram: YES (both criteria)
+- hypothesis_match=+5 (matches Artefacts hypothesis)
+- annotation_match=+3 (artefacts), localization_match=+2 (any), stain_match=+1 (any)
+- openness.code=+2, openness.weights=+2, openness.dataset=+0 (promised), openness.license=+1 (Apache)
+- technical.novel_arch=+1
+- calibration=+1 (lab seen as `Relevant` before)
+- **Raw: 18/21** → Status=Review, Relevance=High, Telegram=YES (both criteria)
+
+### Example 6: Random arXiv preprint, no code, off-topic
+
+- hypothesis_match=0, annotation_match=+3 (tumor), localization_match=0 (rare cancer not in scope), stain_match=+1 (H&E)
+- openness: paper-only +0
+- technical: no novelty +0
+- **Raw: 4/21**
+- calibration: arXiv seen 8× as `Not Relevant` → −1
+- Adjusted: 3 → DROP (don't write)
+
+---
+
+## Calibration sources
+
+The signed ±2 calibration is derived from preflight Step 1, querying the last 20 findings with terminal Status:
+
+- Source × `Not Relevant` count ≥ 5 → source penalty (−1)
+- Organization × `Not Relevant` count ≥ 5 → org penalty (−1)
+- (Source, Domain) × `Relevant`/`In Use` count ≥ 3 → boost (+1)
+- Architecture family matches an `In Use` entry → boost (+1)
+
+The total adjustment is **capped at ±2**. Track which adjustments fired in the Notes `rationale:` line.
+
+## Anti-patterns
+
+- ❌ Don't invent scoring components (no "base", "recency", "freshness", "popularity")
+- ❌ Don't merge components (no "openness=5" — list each as `openness.code: +2`, etc.)
+- ❌ Don't skip a component you don't think applies — write `0` explicitly
+- ❌ Don't downgrade out-of-domain to Low — DROP entirely (radiology never belongs in pathology findings DB)
+- ❌ Don't ignore Local Context Match = Not applicable — apply the applicability filter

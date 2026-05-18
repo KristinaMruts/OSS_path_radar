@@ -8,6 +8,27 @@
 
 For each sub-agent, pass: `active_hypotheses tags`, `seen_urls`, `seen_names`, and the relevant section of this file below.
 
+---
+
+## ⚠️ DOMAIN FILTER — apply BEFORE returning any candidate
+
+**Every extractor sub-agent MUST apply the domain filter from SKILL.md before returning candidates.**
+
+Quick reference (full spec in SKILL.md "Domain filter" section):
+
+**IN SCOPE** (score normally): histology, cytology, IHC, special stains on tissue, FNA/Pap smears, spatial omics + histology (when histology is primary input), WSI analysis, tile classification, cell/mitosis detection, tumor segmentation, stain normalization.
+
+**OUT OF SCOPE** (DROP, do not return): radiology (X-ray/CT/MRI/mammography imaging/ultrasound/PET), dermatology clinical photos, ophthalmology (retinal/OCT), cardiology (ECG/echo), endoscopy video, general medical NLP, genomics-only, surgical/robotic video.
+
+**Ambiguous** → DROP with rationale `out-of-domain: ambiguous`.
+
+Each sub-agent reports counts at the end of its return:
+- `candidates_found`: total before filtering
+- `filtered_out_of_scope`: dropped by domain filter
+- `filtered_already_seen`: dropped by dedup
+
+---
+
 ## Category A — HuggingFace
 
 ### Watched organizations
