@@ -28,12 +28,24 @@ Add this repository as a Company Skill in Paperclip (Settings → Skills → Add
 
 ### 2. Set up Notion DBs
 
-Create two Notion DBs in your workspace:
+Create three Notion DBs in your workspace:
 
 **Hypotheses DB** — your active research hypotheses. Required columns:
 - A `title` property (any name)
 - A `status` select column (any name) — values denoting "active work"
 - A `multi-select` column holding topic tags (e.g. specific biomarkers, tumor types) — this is what findings are matched against
+
+**Watched Sources DB** — list of HuggingFace organizations and company blogs to scan each run. Required columns (names case-sensitive):
+
+| Property | Type | Notes |
+|---|---|---|
+| `Name` | title | e.g. "MahmoodLab" / "Bioptimus News" |
+| `Type` | select | `hf_org` / `company_blog` |
+| `URL` | url | Full URL (e.g. `https://huggingface.co/MahmoodLab` or `https://www.bioptimus.com/news/`) |
+| `Status` | select | `active` / `inactive` |
+| `Notes` | text | Optional context |
+
+Active rows of type `hf_org` are scanned in Category A; active rows of type `company_blog` in Category E. To stop scanning a source, set its Status to `inactive` — no code change.
 
 **Findings DB** — where the skill writes results. Recommended schema (column names ARE case-sensitive in the API; if you rename, update the skill accordingly):
 
@@ -66,9 +78,10 @@ Create a Personal Access Token at https://notion.so/profile/integrations (worksp
 See `SKILL.md` for the full list. Minimum required:
 
 ```
-NOTION_API_KEY          (secret)
-NOTION_HYPOTHESES_DS_ID (data source ID, not database ID)
-NOTION_FINDINGS_DS_ID   (data source ID)
+NOTION_API_KEY                (secret)
+NOTION_HYPOTHESES_DS_ID       (data source ID, not database ID)
+NOTION_FINDINGS_DS_ID         (data source ID)
+NOTION_WATCHED_SOURCES_DS_ID  (data source ID)
 ```
 
 Optional:

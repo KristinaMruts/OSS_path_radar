@@ -12,19 +12,13 @@ For each sub-agent, pass: `active_hypotheses tags`, `seen_urls`, `seen_names`, a
 
 ### Watched organizations
 
-WebFetch each org page; check "Models" tab + "Datasets" tab for recent uploads:
+**The list of organizations to scan is NOT in this file.** It lives in the Notion DB `$NOTION_WATCHED_SOURCES_DS_ID`, in rows where `Type = hf_org` and `Status = active`.
 
-- https://huggingface.co/MahmoodLab — UNI, CONCH, TITAN, THREADS, Feather
-- https://huggingface.co/bioptimus — H-Optimus
-- https://huggingface.co/paige-ai — Virchow, PRISM
-- https://huggingface.co/owkin — Phikon
-- https://huggingface.co/google — Path Foundation, MedGemma
-- https://huggingface.co/histai — Hibou, SPIDER, HISTAI datasets
-- https://huggingface.co/kaiko-ai — Midnight FM, eva framework
-- https://huggingface.co/KatherLab — various
-- https://huggingface.co/microsoft — Prov-GigaPath
+The main session fetches these rows in preflight and passes them to this sub-agent as `hf_orgs = [{name, url}, ...]`. To add or remove a watched organization, edit the Notion DB — no code or skill change needed.
 
-(Extend or trim this list to match the organizations relevant to your domain.)
+WebFetch each `url` from the passed list; check "Models" tab + "Datasets" tab for recent uploads.
+
+If the passed list is empty → skip the org-scan part of this category, only run the general HuggingFace search below.
 
 ### General HuggingFace search
 
@@ -112,18 +106,19 @@ WebSearch: "ICLR" OR "NeurIPS" pathology (current year)
 
 ## Category E — Company blogs
 
-### Watched URLs (WebFetch each, look at posts in scan window)
+### Watched URLs
 
-- https://www.bioptimus.com/news/
-- https://www.owkin.com/blogs-case-studies/
-- https://www.paige.ai/foundation-models
-- https://www.aignostics.com/blog (Atlas FM)
-- https://modella.ai (PathChat DX)
-- https://www.kaiko.ai/blog
+**The list of company blogs to scan is NOT in this file.** It lives in the Notion DB `$NOTION_WATCHED_SOURCES_DS_ID`, in rows where `Type = company_blog` and `Status = active`.
+
+The main session fetches these rows in preflight and passes them to this sub-agent as `company_blogs = [{name, url}, ...]`. To add or remove a watched blog, edit the Notion DB — no code or skill change needed.
+
+WebFetch each `url` from the passed list; look at posts published within the scan window.
+
+If the passed list is empty → skip this category entirely.
 
 ### Extractor: post title + date + summary
 
-If post mentions a GitHub/HF link, follow it for openness signals (don't classify based on blog alone — verify open code/weights).
+If a post mentions a GitHub/HF link, follow it for openness signals (don't classify based on blog text alone — verify open code/weights).
 
 ## Category F — Aggregators + Benchmarks
 

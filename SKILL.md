@@ -28,19 +28,27 @@ A scheduled digest of new open-source models, papers, datasets in computational 
 
 ## Configuration sources (runtime)
 
-Three things vary between runs and must be **fetched at runtime**, not embedded in the skill:
+Four things vary between runs and must be **fetched at runtime**, not embedded in the skill:
 
 1. **`active_hypotheses`** — from Notion DB `$NOTION_HYPOTHESES_DS_ID`
    - Filter rows where status indicates active work (configure via `$HYPOTHESES_ACTIVE_STATUSES`, comma-separated, e.g. `Dev,In progress,To do,Review`)
    - Extract multi-select tags from a configurable column (`$HYPOTHESES_TAGS_COLUMN`, default `Models`) — these are your "what we care about" signals (e.g. specific tumor types, stains, biomarkers)
    - These tags drive scoring boosts
 
-2. **`local_context_snapshot`** — from `$LOCAL_CONTEXT_ENDPOINT_URL` (optional)
+2. **`watched_sources`** — from Notion DB `$NOTION_WATCHED_SOURCES_DS_ID`
+   - Required columns: `Name` (title), `Type` (select: `hf_org` / `company_blog`), `URL` (url), `Status` (select: `active` / `inactive`), `Notes` (text)
+   - Filter rows where `Status = active`
+   - Rows with `Type = hf_org` → scan targets for Category A (HuggingFace) in `source-process.md`
+   - Rows with `Type = company_blog` → scan targets for Category E (Company blogs)
+   - The skill does NOT hardcode any organization or blog URLs — they live entirely in this DB and you edit them in Notion
+   - If empty (no active rows) → categories A and E are skipped silently (other categories still run)
+
+3. **`local_context_snapshot`** — from `$LOCAL_CONTEXT_ENDPOINT_URL` (optional)
    - HTTP GET, returns JSON describing your local domain inventory in any shape
    - The LLM uses this as context when filling the `Local Context Match` field for each finding
    - If env var not set or endpoint fails → skip this enrichment, write `n/a — local context unavailable` in that field
 
-3. **`recent_findings`** — from Notion DB `$NOTION_FINDINGS_DS_ID`
+4. **`recent_findings`** — from Notion DB `$NOTION_FINDINGS_DS_ID`
    - Query 1: rows where date-found ≥ 90 days ago → build seen-set (URLs + names) for dedup
    - Query 2: last 20 rows with `Status` in (e.g. `Not Relevant`, `Relevant`, `In Use`) → calibration signals (Step 0)
 
@@ -49,6 +57,7 @@ Three things vary between runs and must be **fetched at runtime**, not embedded 
 Halt conditions:
 - Hypotheses DB unreachable → halt + Telegram alert ("can't determine what to score against")
 - Findings DB unreachable → halt + Telegram alert ("can't read seen-set, refuse to risk duplicates")
+- Watched sources DB unreachable → halt + Telegram alert ("can't determine scan targets")
 - Local context endpoint unreachable → continue, mark `Local Context Match` as `n/a`
 
 ## Notion API access (critical — read before any Notion call)
@@ -101,6 +110,9 @@ If Notion returns "Make sure the relevant pages and databases are shared with yo
 ```
 1. Preflight (≤60s)
    - Fetch active_hypotheses from Notion → cache tags (e.g. cancer types, stains)
+   - Fetch watched_sources from Notion → build two scan-target lists:
+     - hf_orgs = [{name, url} for rows where Type=hf_org and Status=active]
+     - company_blogs = [{name, url} for rows where Type=company_blog and Status=active]
    - Fetch local_context_snapshot from $LOCAL_CONTEXT_ENDPOINT_URL (optional)
      → on failure: continue with empty snapshot, flag in run summary
    - Fetch recent_findings (last 90 days) from Notion findings DB → build seen-set:
@@ -108,7 +120,7 @@ If Notion returns "Make sure the relevant pages and databases are shared with yo
      - seen_names = lowercased Name (model name match when URLs differ)
    - Fetch calibration set: last 20 rows with terminal Status (Not Relevant / Relevant / In Use)
      → derive per-source / per-organization boost or penalty (see scoring-rubric.md)
-   - Send Telegram "🟡 OSS Radar started — N active hypotheses, M models in seen-set"
+   - Send Telegram "🟡 OSS Radar started — N active hypotheses, M scan targets, K models in seen-set"
 
 2. Scan (sequential sub-agents — MANDATORY, not parallel)
 
@@ -119,18 +131,19 @@ If Notion returns "Make sure the relevant pages and databases are shared with yo
    Anthropic API has per-minute token rate limits; parallel sub-agents hit HTTP 429.
 
    Sub-agent batches (see source-process.md for full details):
-     A. HuggingFace orgs (MahmoodLab, bioptimus, paige-ai, owkin, google, histai, kaiko-ai, etc.)
+     A. HuggingFace orgs — scan targets fetched from $NOTION_WATCHED_SOURCES_DS_ID (Type=hf_org)
         + general HF search
      B. arXiv (cs.CV, eess.IV, cs.LG with histopathology / "computational pathology" / "foundation model")
      C. GitHub (topic:computational-pathology, "digital pathology" recently updated)
      D. PapersWithCode + MICCAI/CVPR accepted lists
-     E. Company blogs (bioptimus, owkin, paige, aignostics, modella, kaiko)
+     E. Company blogs — scan targets fetched from $NOTION_WATCHED_SOURCES_DS_ID (Type=company_blog)
      F. Aggregators (grand-challenge, awesome-lists, PathBench leaderboard)
      G. High-impact journals + news (Cell/Nature via Scholar+news-medical proxies — direct WebFetch fails 403)
      H. Microsoft Research blog + Azure Foundry Labs + Google Health blog
 
    Each sub-agent:
-     - Receives: scan window (default last 4 days), active_hypotheses tags, seen-set
+     - Receives: scan window (default last 4 days), active_hypotheses tags, seen-set,
+       and (for A and E) the watched_sources list relevant to its category
      - Scans its category per source-process.md
      - Filters out URLs and names already in seen-set BEFORE returning
      - Returns compact JSON [{name, source, organization, url, hf_url, github_url, weights_url,
@@ -373,6 +386,8 @@ Or on partial failure:
 |---|---|
 | Notion API auth fails (401/500) | Halt. Telegram "🔴 OSS Radar: Notion auth failed". |
 | Hypotheses DB returns 0 active rows | Halt. Telegram "🔴 OSS Radar: no active hypotheses configured". |
+| Watched sources DB unreachable | Halt. Telegram "🔴 OSS Radar: can't read watched sources DB". |
+| Watched sources DB has 0 active rows | Continue. Skip categories A and E silently. Note in run summary "no watched sources configured". |
 | Local context endpoint fails (timeout/500) | Continue. Write "n/a — local context unavailable" in `Local Context Match`. Note in run summary. |
 | Findings DB unreachable | Halt. Telegram "🔴 OSS Radar: can't read seen-set, refuse to risk duplicates". |
 | Single source category fails (timeout/404) | Skip category, continue with others. Log "X unavailable" in run digest. |
@@ -388,6 +403,7 @@ Or on partial failure:
 | `NOTION_API_KEY` | yes | Notion Personal Access Token or Internal Integration secret |
 | `NOTION_HYPOTHESES_DS_ID` | yes | Data source ID of your active-hypotheses DB |
 | `NOTION_FINDINGS_DS_ID` | yes | Data source ID of your findings DB (read for dedup, write new entries) |
+| `NOTION_WATCHED_SOURCES_DS_ID` | yes | Data source ID of your watched-sources DB (HF orgs + company blogs to scan). Schema: see "Configuration sources" |
 | `HYPOTHESES_ACTIVE_STATUSES` | no | Comma-separated status values that count as active (default `Dev,In progress,To do,Review`) |
 | `HYPOTHESES_TAGS_COLUMN` | no | Column name in hypotheses DB holding the topic tags (default `Models`) |
 | `LOCAL_CONTEXT_ENDPOINT_URL` | no | HTTP GET URL returning your local domain inventory JSON. If unset, `Local Context Match` becomes `n/a` |
