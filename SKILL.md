@@ -9,9 +9,9 @@ description: |
   Score each finding 0-21 (relevance + openness + technical) using EXACT rubric components.
   Apply applicability filter (drop findings outside user's local stack). Write rich-analysis
   cards to a findings Notion DB, push digests to Telegram (plain text) and/or Mattermost
-  (markdown) for hot findings (raw score ≥ 8 OR open code+weights). Use this skill when
-  triggered for scheduled OSS monitoring or manually via Assign Task.
-version: 1.3.1
+  (markdown) for ALL new findings (HIGH + MED), grouped by relevance bucket. Use this skill
+  when triggered for scheduled OSS monitoring or manually via Assign Task.
+version: 1.4.0
 metadata:
   recommended_cadence: twice weekly (e.g. Mon + Thu)
   config_sources:
@@ -20,6 +20,7 @@ metadata:
     findings_db: Notion DB for findings — read for dedup/calibration, write new entries (id in env NOTION_FINDINGS_DS_ID)
     local_context_endpoint: optional HTTP endpoint returning your local domain inventory (url in env LOCAL_CONTEXT_ENDPOINT_URL)
   changelog:
+    "1.4.0": Digest includes BOTH HIGH and MED findings (previously HIGH only). Visual bucket separation (━━━ 🔴 HIGH ━━━ / ━━━ 🟡 MED ━━━). Trigger simplified to "any new finding this run".
     "1.3.1": Digest format — show ALL hot findings expanded (no top-3 cap), explicit Russian labels (Оценка/Источник/Код/Dataset/Описание), splitting rules for Telegram 4096 / Mattermost 16383 char limits
     "1.3.0": Add Mattermost output channel (parallel to Telegram, markdown-rich format via REST API + PAT)
     "1.2.0": Inline scoring rubric, hard domain filter, applicability filter, enforce Notes/Telegram templates, fix max score 19→21
@@ -33,7 +34,7 @@ metadata:
 
 A scheduled digest of new open-source models, papers, datasets in computational pathology. Each finding is filtered (hard domain check), scored 0-21 against your active hypotheses, and assessed for applicability against your local stack. Hot findings (raw score ≥ 8 OR full open stack) go to Telegram; everything ≥ 4 AND applicable to your stack goes to the findings Notion DB with full rich analysis.
 
-**Not a news aggregator** — a filter producing 0-5 hot findings per run, plus 3-10 medium-relevance entries for later review. Findings that aren't usable in your stack (e.g. radiology when you do pathology, spatial transcriptomics when you do H&E only) are dropped or marked Not Relevant — they don't pollute the findings DB.
+**Not a news aggregator** — a filter producing 0-15 findings per run (typically 0-3 HIGH + 3-10 MED), all delivered in the digest with HIGH/MED visually separated. Findings that aren't usable in your stack (e.g. radiology when you do pathology, spatial transcriptomics when you do H&E only) are dropped or marked Not Relevant — they don't pollute the digest or findings DB.
 
 ## Configuration sources (runtime)
 
@@ -177,7 +178,8 @@ If Notion returns "Make sure the relevant pages and databases are shared with yo
    - Apply calibration boost/penalty (from preflight)
    - Drop anything score < 4 (noise)
    - Apply hard rules (inline below)
-   - Determine Telegram trigger: raw score ≥ 8 OR (open code AND open weights)
+   - All findings ≥ 4 that survive applicability filter go into the digest (HIGH + MED).
+     No separate "trigger" — everything written to Notion in this run is also in the digest.
 
 4. Local context matching + applicability filter (CRITICAL)
    For each remaining candidate:
@@ -198,12 +200,16 @@ If Notion returns "Make sure the relevant pages and databases are shared with yo
    - VALIDATE all required schema fields filled (Domain, Type, Source, Organization, Status, Relevance, Date Found, URL, Summary, Notes, Local Context Match)
 
 6. Digests (Telegram + Mattermost — both independent, neither blocks the other)
-   - Build digest with top 3 hot findings expanded + rest as one-liners
-   - For each: VALIDATE every expanded block has all mandatory fields
+   - Build digest with ALL findings expanded, grouped by bucket:
+     ━━━ 🔴 HIGH (N) ━━━ first, sorted by score desc
+     ━━━ 🟡 MED  (M) ━━━ second, sorted by score desc
+   - Continuous numbering across buckets (1, 2, ... N+M)
+   - VALIDATE every expanded block has all mandatory fields
    - If a block can't be validated → DROP from digest, don't send abbreviated
-   - Send Telegram digest (only if Telegram-trigger count > 0 AND Telegram env vars set)
-   - Send Mattermost digest (only if Mattermost-trigger count > 0 AND Mattermost env vars set)
+   - Send Telegram digest (only if total findings > 0 AND Telegram env vars set)
+   - Send Mattermost digest (only if total findings > 0 AND Mattermost env vars set)
    - If one channel fails, the other still proceeds — log which succeeded in run summary
+   - If 0 findings → send "✅ Quiet run" to configured channels
 
 7. On any failure
    - Send to whichever channel is configured: "⚠️ partial: <what failed>"
@@ -347,13 +353,16 @@ If finding is purely a dataset (no model):
 - Notion `Type` = `Dataset`
 - Openness criteria: open data = +2, license = +1
 
-## Telegram trigger (UNAMBIGUOUS)
+## Digest trigger (UNAMBIGUOUS)
 
-A finding goes to Telegram digest if EITHER:
-- raw score ≥ 8 (before hard-rule modifiers), OR
-- open code AND open weights (full open stack)
+A finding goes to the digest (Telegram + Mattermost) if it is **written to Notion in this run** — i.e. it survived:
+- Domain filter (Step 2/3 — pathology only)
+- Score threshold (Step 3 — raw score ≥ 4)
+- Applicability filter (Step 4 — not "Not applicable" with score < 12)
 
-Status/Relevance modifiers DO NOT block Telegram. Domain Filter and Applicability Filter DO block (out-of-domain or fully not-applicable findings never reach Telegram because they never reach Step 6).
+In other words: everything in the day's Notion findings page is in the digest, grouped by HIGH (score ≥ 8 or full open stack per Hard Rule 1) and MED (4-7).
+
+There is NO separate "send to Telegram only the hot ones" filter anymore (was removed in v1.4.0).
 
 ## Anchor examples
 
@@ -500,13 +509,15 @@ Do NOT set `parse_mode` — plain text only.
 
 ### Telegram message body — mandatory template
 
-**Include ALL hot findings expanded — no top-N truncation.**
+**Include ALL findings (HIGH + MED) expanded, grouped by bucket. No top-N truncation.**
 
 ```
-🔬 OSS Radar — <K> новых hot · <YYYY-MM-DD>
+🔬 OSS Radar — <T> новых findings (<H> HIGH, <M> MED) · <YYYY-MM-DD>
+
+━━━ 🔴 HIGH (<H>) ━━━
 
 1. <Model Name>
-   Оценка: X/21  <🔴 HIGH | 🟡 MED>
+   Оценка: X/21
    Источник: <HuggingFace | ArXiv | GitHub | ...>
    Код: ✅/❌/⏳  Веса: ✅/❌/⏳  Dataset: ✅/❌/⏳  Лицензия: <short>
    Match: <hypothesis tag>, <annotation>, <localization>
@@ -516,13 +527,21 @@ Do NOT set `parse_mode` — plain text only.
    📋 Notion: <Notion page URL>
 
 2. <Model Name 2>
-   Оценка: Y/21  ...
+   Оценка: Y/21
    ...
 
-(continue for ALL K hot findings — do not truncate)
+━━━ 🟡 MED (<M>) ━━━
+
+<H+1>. <Model Name 3>
+   Оценка: Z/21
+   ...
+
+(continue numbering across buckets, expand ALL findings — do not truncate)
 
 Run: <YYYY-MM-DD HH:MM TZ>
 ```
+
+If a bucket is empty, omit its header (e.g. "0 HIGH, 5 MED" → only show MED block).
 
 ### Splitting long messages
 
@@ -558,9 +577,9 @@ Local context: ✅ loaded | ⚠️ unavailable | — not configured
 
 End:
 ```
-✅ OSS Radar done — <K> hot, <M> medium-relevance (total <T> findings)
+✅ OSS Radar done — <T> findings (<H> HIGH, <M> MED)
 Filtered: <X> out-of-domain, <Y> not-applicable
-Telegram digest: <yes/no>
+Digest: Telegram <yes/no>, Mattermost <yes/no>
 Notion: <URL filtered to today>
 ```
 
@@ -598,12 +617,17 @@ If the API returns 401 → token invalid/expired. If 403 → user lacks permissi
 
 ### Mattermost message body — mandatory template (markdown)
 
-**Include ALL hot findings expanded — no top-N truncation.**
+**Include ALL findings (HIGH + MED) expanded, grouped by bucket. No top-N truncation.**
 
 ```markdown
-## 🔬 OSS Radar — <K> новых hot · <YYYY-MM-DD>
+## 🔬 OSS Radar — <T> новых findings · <YYYY-MM-DD>
+**<H> HIGH · <M> MED**
 
-### 1. [<Model Name>](<canonical URL>) — **<X>/21** <🔴 HIGH | 🟡 MED>
+---
+
+## 🔴 HIGH (<H>)
+
+### 1. [<Model Name>](<canonical URL>) — **<X>/21**
 
 **Оценка:** X/21  
 **Источник:** <HuggingFace | ArXiv | GitHub | ...>  
@@ -618,10 +642,19 @@ If the API returns 401 → token invalid/expired. If 403 → user lacks permissi
 ---
 
 ### 2. [<Model Name 2>](<URL>) — **<Y>/21** ...
+
+...
+
+---
+
+## 🟡 MED (<M>)
+
+### <H+1>. [<Model Name>](<URL>) — **<Z>/21** ...
+
 ...
 ```
 
-(Continue for ALL K hot findings with the structure above, separated by `---`. No truncation.)
+(Continue numbering across buckets, expand ALL findings with the structure above, separated by `---`. No truncation. If a bucket is empty, omit its header.)
 
 ### Splitting long messages
 
@@ -654,7 +687,7 @@ Start:
 
 End:
 ```markdown
-✅ **OSS Radar done** — <K> hot, <M> medium-relevance · [today's findings](<Notion URL>)
+✅ **OSS Radar done** — <T> findings (<H> HIGH, <M> MED) · [today's findings](<Notion URL>)
 ```
 
 Partial failure:
