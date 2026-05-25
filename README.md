@@ -89,11 +89,17 @@ Optional:
 ```
 TELEGRAM_BOT_TOKEN           (secret)
 TELEGRAM_CHAT_ID
+MATTERMOST_URL               (base URL, e.g. https://mattermost.example.com)
+MATTERMOST_TOKEN             (secret, Personal Access Token)
+MATTERMOST_CHANNEL_ID        (26-char channel ID)
+MATTERMOST_USERNAME          (optional override, requires server-side EnablePostUsernameOverride)
 LOCAL_CONTEXT_ENDPOINT_URL   (HTTP endpoint returning your domain inventory JSON)
 HYPOTHESES_ACTIVE_STATUSES   (comma-separated, default: Dev,In progress,To do,Review)
 HYPOTHESES_TAGS_COLUMN       (default: Models)
 SCAN_WINDOW_DAYS             (default: 4)
 ```
+
+**Telegram vs Mattermost:** both are optional, independent channels. Telegram sends plain text (its markdown parser breaks on special characters in URLs/titles). Mattermost gets richer markdown formatting (bold names, hyperlinks, blockquotes). If neither is configured, the skill runs in Notion-only mode.
 
 ### 5. Create the agent + Routine
 
