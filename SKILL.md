@@ -11,7 +11,7 @@ description: |
   cards to a findings Notion DB, push digests to Telegram (plain text) and/or Mattermost
   (markdown) for hot findings (raw score ≥ 8 OR open code+weights). Use this skill when
   triggered for scheduled OSS monitoring or manually via Assign Task.
-version: 1.3.0
+version: 1.3.1
 metadata:
   recommended_cadence: twice weekly (e.g. Mon + Thu)
   config_sources:
@@ -20,6 +20,7 @@ metadata:
     findings_db: Notion DB for findings — read for dedup/calibration, write new entries (id in env NOTION_FINDINGS_DS_ID)
     local_context_endpoint: optional HTTP endpoint returning your local domain inventory (url in env LOCAL_CONTEXT_ENDPOINT_URL)
   changelog:
+    "1.3.1": Digest format — show ALL hot findings expanded (no top-3 cap), explicit Russian labels (Оценка/Источник/Код/Dataset/Описание), splitting rules for Telegram 4096 / Mattermost 16383 char limits
     "1.3.0": Add Mattermost output channel (parallel to Telegram, markdown-rich format via REST API + PAT)
     "1.2.0": Inline scoring rubric, hard domain filter, applicability filter, enforce Notes/Telegram templates, fix max score 19→21
     "1.1.0": Externalize HF orgs + company blogs to Notion config DB
@@ -582,47 +583,52 @@ If the API returns 401 → token invalid/expired. If 403 → user lacks permissi
 
 ### Mattermost message body — mandatory template (markdown)
 
-For each hot finding (top 3 expanded):
+**Include ALL hot findings expanded — no top-N truncation.**
 
 ```markdown
-## 🔬 OSS Radar — <K> hot findings · <YYYY-MM-DD>
+## 🔬 OSS Radar — <K> новых hot · <YYYY-MM-DD>
 
-### 1. [<Model Name>](<canonical URL>) · <Source> · **<X>/21** <🔴 HIGH | 🟡 MED>
+### 1. [<Model Name>](<canonical URL>) — **<X>/21** <🔴 HIGH | 🟡 MED>
 
-**Match:** <hypothesis tag> / <annotation> / <localization> (<stain>)  
-**Openness:** code <✅/❌/⏳> · weights <✅/❌/⏳> · data <✅/❌/⏳> · license <short>
+**Оценка:** X/21  
+**Источник:** <HuggingFace | ArXiv | GitHub | ...>  
+**Код** <✅/❌/⏳> · **Веса** <✅/❌/⏳> · **Dataset** <✅/❌/⏳> · **Лицензия:** <short>  
+**Match:** <hypothesis tag> / <annotation> / <localization> (<stain>)
 
-> <One-line summary with key number — what is this, what's special>
+> <Описание: one-line summary with key number>
 
-🎯 **Value:** <fine-tune / eval / replace / research signal>  
+🎯 **Ценность:** <fine-tune / eval / replace / research signal>  
 📋 [Notion entry](<Notion page URL>)
 
 ---
 
-### 2. [<Model Name 2>](<URL>) · <Source> · **<Y>/21** ...
+### 2. [<Model Name 2>](<URL>) — **<Y>/21** ...
 ...
 ```
 
-(Up to top 3 expanded with the structure above, separated by `---`. Remaining hot findings as one-liners after the divider.)
+(Continue for ALL K hot findings with the structure above, separated by `---`. No truncation.)
 
-Remaining hot findings (one-liner):
-```markdown
-4. [<Name>](<URL>) — **<X>/21** · [Notion](<URL>)
-```
+### Splitting long messages
 
-### Mattermost validation checklist (run BEFORE sending each expanded block)
+Mattermost default max post size is **16383 characters** (server-configurable). If the assembled digest exceeds this:
+- Split into multiple sequential posts: header `## 🔬 OSS Radar (часть P/N) — продолжение`
+- Break at finding boundaries (never mid-block)
+- 16K is rarely hit (≈ 20+ findings); if hit, calibration probably needs review
 
-Same content rules as Telegram (see "Telegram validation checklist"). Specifically:
+### Mattermost validation checklist (run BEFORE sending each block)
 
-- [ ] Name + Source present?
-- [ ] score=X/21 present?
-- [ ] match line present?
-- [ ] Openness flags line present (all 4)?
-- [ ] One-line summary present (NOT empty)?
-- [ ] 🎯 Value line present (NOT empty)?
+Same content rules as Telegram:
+
+- [ ] Name + URL present (clickable hyperlink)?
+- [ ] **Оценка** X/21 present?
+- [ ] **Источник** present?
+- [ ] **Код / Веса / Dataset / Лицензия** all 4 present?
+- [ ] **Match** line present?
+- [ ] Описание (blockquote) present (NOT empty)?
+- [ ] 🎯 **Ценность** present (NOT empty)?
 - [ ] Notion URL present?
 
-If ANY check fails for an expanded block → DROP this finding from Mattermost digest. Better to skip than send broken card.
+If ANY check fails for a block → DROP this finding from Mattermost digest. Better to skip than send broken card.
 
 ### Run status (Mattermost) — always sent if Mattermost configured
 
