@@ -500,35 +500,50 @@ Do NOT set `parse_mode` — plain text only.
 
 ### Telegram message body — mandatory template
 
-```
-🔬 OSS Radar — <K> hot findings
+**Include ALL hot findings expanded — no top-N truncation.**
 
-1. <Model Name> (<Source>) score=X/21
-   match: <hypothesis tag>, <annotation>, <localization>
-   📦 code: ✅/❌  weights: ✅/❌  data: ✅/❌  license: <short>
-   <one-line summary with key number — what is this, what's special>
-   🎯 Value: <fine-tune / eval / replace / research signal>
-   📄 paper/repo: <URL>
+```
+🔬 OSS Radar — <K> новых hot · <YYYY-MM-DD>
+
+1. <Model Name>
+   Оценка: X/21  <🔴 HIGH | 🟡 MED>
+   Источник: <HuggingFace | ArXiv | GitHub | ...>
+   Код: ✅/❌/⏳  Веса: ✅/❌/⏳  Dataset: ✅/❌/⏳  Лицензия: <short>
+   Match: <hypothesis tag>, <annotation>, <localization>
+   Описание: <one-line summary with key number — what is it, what's special>
+   🎯 Ценность: <fine-tune / eval / replace / research signal>
+   📄 <paper/repo URL>
    📋 Notion: <Notion page URL>
 
-2. <Model Name 2> (<Source>) score=Y/21
+2. <Model Name 2>
+   Оценка: Y/21  ...
    ...
+
+(continue for ALL K hot findings — do not truncate)
+
+Run: <YYYY-MM-DD HH:MM TZ>
 ```
 
-(Up to top 3 expanded. Remaining hot findings: one-line `4. <Name> score=X — see Notion: <URL>`.)
+### Splitting long messages
 
-### Telegram validation checklist (run BEFORE sending each expanded block)
+Telegram has a **4096 character limit** per message. If the assembled digest exceeds this:
+- Split into multiple sequential messages: header `🔬 OSS Radar (часть P/N) — продолжение`
+- Each part is a complete message (no mid-block split) — break at finding boundaries
+- Validation still applies per-block
 
-- [ ] Name + Source present?
-- [ ] score=X/21 present?
-- [ ] match line present (with hypothesis tag OR "—", annotation, localization)?
-- [ ] 📦 line with all 4 flags (code/weights/data/license)?
-- [ ] One-line summary present (NOT empty)?
-- [ ] 🎯 Value line present (NOT empty)?
+### Telegram validation checklist (run BEFORE sending each block)
+
+- [ ] Name present?
+- [ ] `Оценка: X/21` present?
+- [ ] `Источник:` present?
+- [ ] `Код:` / `Веса:` / `Dataset:` / `Лицензия:` all 4 present?
+- [ ] `Match:` line present (with hypothesis tag OR "—", annotation, localization)?
+- [ ] `Описание:` present (NOT empty)?
+- [ ] `🎯 Ценность:` present (NOT empty)?
 - [ ] paper/repo URL present?
 - [ ] Notion page URL present?
 
-If ANY check fails for an expanded block → DROP this finding from Telegram digest (it still goes to Notion). Do NOT send abbreviated/incomplete messages — better to skip one entry than confuse Kristina with broken cards.
+If ANY check fails for a block → DROP this finding from Telegram digest (it still goes to Notion). Do NOT send abbreviated/incomplete messages — better to skip one entry than confuse with broken cards.
 
 ### Run status (Telegram) — always sent (if Telegram configured)
 
